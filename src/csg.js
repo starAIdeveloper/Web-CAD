@@ -16,7 +16,7 @@ function divide(face,plane,coplanarFront,coplanarBack,front,back){
 }
 class Partition{
  constructor(faces=[],depth=0){this.plane=null;this.faces=[];this.front=null;this.back=null;this.build(faces,depth);}
- build(faces,depth=0){if(depth>256)throw Error('Boolean partition is too complex');if(!faces.length)return;if(!this.plane)this.plane={normal:faces[0].normal.clone(),offset:faces[0].offset};const front=[],back=[];for(const f of faces)divide(f,this.plane,this.faces,this.faces,front,back);if(front.length){this.front??=new Partition();this.front.build(front,depth+1);}if(back.length){this.back??=new Partition();this.back.build(back,depth+1);}}
+ build(faces,depth=0){if(depth>1024)throw Error('Boolean partition is too complex');if(!faces.length)return;if(!this.plane)this.plane={normal:faces[0].normal.clone(),offset:faces[0].offset};const front=[],back=[];for(const f of faces)divide(f,this.plane,this.faces,this.faces,front,back);if(front.length){this.front??=new Partition();this.front.build(front,depth+1);}if(back.length){this.back??=new Partition();this.back.build(back,depth+1);}}
  invert(){this.faces.forEach(f=>f.flip());if(this.plane){this.plane.normal.negate();this.plane.offset=-this.plane.offset;}this.front?.invert();this.back?.invert();[this.front,this.back]=[this.back,this.front];}
  clipFaces(faces){if(!this.plane)return faces.slice();let front=[],back=[];for(const f of faces)divide(f,this.plane,front,back,front,back);if(this.front)front=this.front.clipFaces(front);back=this.back?this.back.clipFaces(back):[];return front.concat(back);}
  clipTo(other){this.faces=other.clipFaces(this.faces);this.front?.clipTo(other);this.back?.clipTo(other);}
