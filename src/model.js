@@ -1,29 +1,264 @@
-import * as THREE from 'three';
-import {booleanGeometry} from './csg.js';
-export const TYPES=['box','cylinder','sphere','extrude','boolean'];
-const clone=x=>JSON.parse(JSON.stringify(x));
-export function makeNode(type,id){return {id,name:type[0].toUpperCase()+type.slice(1),type,visible:true,color:'#78a8c9',position:[0,0,0],rotation:[0,0,0],params:type==='box'?{width:30,depth:24,height:12}:type==='cylinder'?{radius:8,height:25}:type==='sphere'?{radius:12}:type==='extrude'?{height:12,profile:[[0,0],[25,0],[25,10],[10,10],[10,25],[0,25]]}:{operation:'union',a:'',b:''}};}
-function number(v,min,max){if(typeof v!=='number'||!Number.isFinite(v)||v<min||v>max)throw Error('Invalid numeric parameter');return v;}
-function orientation(a,b,c){return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);}
-export function validateProfile(points){if(!Array.isArray(points)||points.length<3||points.length>64)throw Error('A sketch needs 3 to 64 vertices');for(const p of points){if(!Array.isArray(p)||p.length!==2)throw Error('Invalid sketch vertex');p.forEach(v=>number(v,-1000,1000));}let area=0;
- for(let i=0;i<points.length;i++){const a=points[i],b=points[(i+1)%points.length];if(Math.hypot(a[0]-b[0],a[1]-b[1])<.001)throw Error('Duplicate sketch vertices');area+=a[0]*b[1]-b[0]*a[1];for(let j=i+1;j<points.length;j++){if(j===i+1||(i===0&&j===points.length-1))continue;const c=points[j],d=points[(j+1)%points.length];const o=[orientation(a,b,c),orientation(a,b,d),orientation(c,d,a),orientation(c,d,b)];if(o[0]*o[1]<=0&&o[2]*o[3]<=0 && Math.max(Math.min(a[0],b[0]),Math.min(c[0],d[0]))<=Math.min(Math.max(a[0],b[0]),Math.max(c[0],d[0])) && Math.max(Math.min(a[1],b[1]),Math.min(c[1],d[1]))<=Math.min(Math.max(a[1],b[1]),Math.max(c[1],d[1])))throw Error('Sketch edges intersect');}}
- if(Math.abs(area)<.01)throw Error('Sketch has no enclosed area');return points;
+import * as THREE from "three";
+import { booleanGeometry } from "./csg.js";
+export const TYPES = ["box", "cylinder", "sphere", "extrude", "boolean"];
+const clone = (x) => JSON.parse(JSON.stringify(x));
+export function makeNode(type, id) {
+  return {
+    id,
+    name: type[0].toUpperCase() + type.slice(1),
+    type,
+    visible: true,
+    color: "#78a8c9",
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    params:
+      type === "box"
+        ? { width: 30, depth: 24, height: 12 }
+        : type === "cylinder"
+          ? { radius: 8, height: 25 }
+          : type === "sphere"
+            ? { radius: 12 }
+            : type === "extrude"
+              ? {
+                  height: 12,
+                  profile: [
+                    [0, 0],
+                    [25, 0],
+                    [25, 10],
+                    [10, 10],
+                    [10, 25],
+                    [0, 25],
+                  ],
+                }
+              : { operation: "union", a: "", b: "" },
+  };
 }
-export function validateDocument(input){if(!input||input.version!==1||!Array.isArray(input.nodes)||input.nodes.length>40)throw Error('Invalid or oversized CAD document');const ids=new Set();const nodes=input.nodes.map(n=>{
- if(!n||typeof n.id!=='string'||!/^[a-zA-Z0-9_-]{1,60}$/.test(n.id)||ids.has(n.id))throw Error('Duplicate or invalid object ID');ids.add(n.id);if(!TYPES.includes(n.type)||typeof n.name!=='string'||n.name.length>80||typeof n.visible!=='boolean'||!/^#[0-9a-f]{6}$/i.test(n.color))throw Error('Invalid object metadata');for(const key of ['position','rotation']){if(!Array.isArray(n[key])||n[key].length!==3)throw Error('Invalid placement');n[key].forEach(v=>number(v,-10000,10000));}
- const p=n.params;if(!p||typeof p!=='object')throw Error('Missing parameters');const allowed={box:['width','depth','height'],cylinder:['radius','height'],sphere:['radius'],extrude:['height','profile'],boolean:['operation','a','b']}[n.type];if(Object.keys(p).some(k=>!allowed.includes(k)))throw Error('Unknown feature parameter');if(n.type==='box'){for(const k of ['width','depth','height'])number(p[k],.1,1000);}if(['cylinder','sphere'].includes(n.type))number(p.radius,.1,1000);if(n.type==='cylinder')number(p.height,.1,1000);if(n.type==='extrude'){number(p.height,.1,1000);validateProfile(p.profile);}if(n.type==='boolean'&&(!['union','cut','intersection'].includes(p.operation)||typeof p.a!=='string'||typeof p.b!=='string'||p.a===p.b))throw Error('Invalid Boolean operands');return clone(n);});
- const byId=new Map(nodes.map(n=>[n.id,n])),visited=new Set(),stack=new Set();function walk(id){if(stack.has(id))throw Error('Cyclic feature dependencies');if(visited.has(id))return;const n=byId.get(id);if(!n)throw Error('Missing Boolean operand');stack.add(id);if(n.type==='boolean'){walk(n.params.a);walk(n.params.b);}stack.delete(id);visited.add(id);}nodes.forEach(n=>walk(n.id));return {version:1,name:typeof input.name==='string'?input.name.slice(0,80):'Untitled',nodes};
+function number(v, min, max) {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max)
+    throw Error("Invalid numeric parameter");
+  return v;
 }
-export function buildGeometries(doc){doc=validateDocument(doc);const result=new Map(),byId=new Map(doc.nodes.map(n=>[n.id,n]));function build(id){if(result.has(id))return result.get(id);const n=byId.get(id),p=n.params;let g;
- if(n.type==='box'){g=new THREE.BoxGeometry(p.width,p.depth,p.height);g.translate(0,0,p.height/2);}else if(n.type==='cylinder'){g=new THREE.CylinderGeometry(p.radius,p.radius,p.height,32);g.rotateX(Math.PI/2);g.translate(0,0,p.height/2);}else if(n.type==='sphere'){g=new THREE.SphereGeometry(p.radius,24,12);g.translate(0,0,p.radius);}else if(n.type==='extrude'){const shape=new THREE.Shape(p.profile.map(v=>new THREE.Vector2(...v)));g=new THREE.ExtrudeGeometry(shape,{depth:p.height,bevelEnabled:false,steps:1});}else g=booleanGeometry(build(p.a),build(p.b),p.operation);
- const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(...n.rotation.map(THREE.MathUtils.degToRad)));g.applyMatrix4(new THREE.Matrix4().compose(new THREE.Vector3(...n.position),q,new THREE.Vector3(1,1,1)));g.computeBoundingBox();result.set(id,g);return g;}doc.nodes.forEach(n=>build(n.id));return result;}
-export class History{
- constructor(doc={version:1,name:'Untitled',nodes:[]}){this.doc=validateDocument(doc);this.past=[];this.future=[];}
- apply(change){const next=clone(this.doc);change(next);const valid=validateDocument(next);this.past.push(this.doc);if(this.past.length>50)this.past.shift();this.doc=valid;this.future=[];return this.doc;}
- undo(){if(!this.past.length)return;this.future.push(this.doc);this.doc=this.past.pop();}
- redo(){if(!this.future.length)return;this.past.push(this.doc);this.doc=this.future.pop();}
+function orientation(a, b, c) {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
-export function sample(){const a=makeNode('box','base');a.name='Mounting block';a.params={width:50,depth:35,height:14};a.position=[0,0,0];a.visible=false;
- const b=makeNode('cylinder','bore');b.name='Bore tool';b.params={radius:7,height:20};b.position=[0,0,-3];b.visible=false;
- const c=makeNode('boolean','cut');c.name='Block with bore';c.params={operation:'cut',a:'base',b:'bore'};
- const d=makeNode('extrude','bracket');d.name='L profile extrusion';d.position=[33,-15,0];d.params.height=20;d.color='#d6aa64';return {version:1,name:'Parametric mounting assembly',nodes:[a,b,c,d]};}
+export function validateProfile(points) {
+  if (!Array.isArray(points) || points.length < 3 || points.length > 64)
+    throw Error("A sketch needs 3 to 64 vertices");
+  for (const p of points) {
+    if (!Array.isArray(p) || p.length !== 2)
+      throw Error("Invalid sketch vertex");
+    p.forEach((v) => number(v, -1000, 1000));
+  }
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i],
+      b = points[(i + 1) % points.length];
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.001)
+      throw Error("Duplicate sketch vertices");
+    area += a[0] * b[1] - b[0] * a[1];
+    for (let j = i + 1; j < points.length; j++) {
+      if (j === i + 1 || (i === 0 && j === points.length - 1)) continue;
+      const c = points[j],
+        d = points[(j + 1) % points.length];
+      const o = [
+        orientation(a, b, c),
+        orientation(a, b, d),
+        orientation(c, d, a),
+        orientation(c, d, b),
+      ];
+      if (
+        o[0] * o[1] <= 0 &&
+        o[2] * o[3] <= 0 &&
+        Math.max(Math.min(a[0], b[0]), Math.min(c[0], d[0])) <=
+          Math.min(Math.max(a[0], b[0]), Math.max(c[0], d[0])) &&
+        Math.max(Math.min(a[1], b[1]), Math.min(c[1], d[1])) <=
+          Math.min(Math.max(a[1], b[1]), Math.max(c[1], d[1]))
+      )
+        throw Error("Sketch edges intersect");
+    }
+  }
+  if (Math.abs(area) < 0.01) throw Error("Sketch has no enclosed area");
+  return points;
+}
+export function validateDocument(input) {
+  if (
+    !input ||
+    input.version !== 1 ||
+    !Array.isArray(input.nodes) ||
+    input.nodes.length > 40
+  )
+    throw Error("Invalid or oversized CAD document");
+  const ids = new Set();
+  const nodes = input.nodes.map((n) => {
+    if (
+      !n ||
+      typeof n.id !== "string" ||
+      !/^[a-zA-Z0-9_-]{1,60}$/.test(n.id) ||
+      ids.has(n.id)
+    )
+      throw Error("Duplicate or invalid object ID");
+    ids.add(n.id);
+    if (
+      !TYPES.includes(n.type) ||
+      typeof n.name !== "string" ||
+      n.name.length > 80 ||
+      typeof n.visible !== "boolean" ||
+      !/^#[0-9a-f]{6}$/i.test(n.color)
+    )
+      throw Error("Invalid object metadata");
+    for (const key of ["position", "rotation"]) {
+      if (!Array.isArray(n[key]) || n[key].length !== 3)
+        throw Error("Invalid placement");
+      n[key].forEach((v) => number(v, -10000, 10000));
+    }
+    const p = n.params;
+    if (!p || typeof p !== "object") throw Error("Missing parameters");
+    const allowed = {
+      box: ["width", "depth", "height"],
+      cylinder: ["radius", "height"],
+      sphere: ["radius"],
+      extrude: ["height", "profile"],
+      boolean: ["operation", "a", "b"],
+    }[n.type];
+    if (Object.keys(p).some((k) => !allowed.includes(k)))
+      throw Error("Unknown feature parameter");
+    if (n.type === "box") {
+      for (const k of ["width", "depth", "height"]) number(p[k], 0.1, 1000);
+    }
+    if (["cylinder", "sphere"].includes(n.type)) number(p.radius, 0.1, 1000);
+    if (n.type === "cylinder") number(p.height, 0.1, 1000);
+    if (n.type === "extrude") {
+      number(p.height, 0.1, 1000);
+      validateProfile(p.profile);
+    }
+    if (
+      n.type === "boolean" &&
+      (!["union", "cut", "intersection"].includes(p.operation) ||
+        typeof p.a !== "string" ||
+        typeof p.b !== "string" ||
+        p.a === p.b)
+    )
+      throw Error("Invalid Boolean operands");
+    return clone(n);
+  });
+  const byId = new Map(nodes.map((n) => [n.id, n])),
+    visited = new Set(),
+    stack = new Set();
+  function walk(id) {
+    if (stack.has(id)) throw Error("Cyclic feature dependencies");
+    if (visited.has(id)) return;
+    const n = byId.get(id);
+    if (!n) throw Error("Missing Boolean operand");
+    stack.add(id);
+    if (n.type === "boolean") {
+      walk(n.params.a);
+      walk(n.params.b);
+    }
+    stack.delete(id);
+    visited.add(id);
+  }
+  nodes.forEach((n) => walk(n.id));
+  return {
+    version: 1,
+    name: typeof input.name === "string" ? input.name.slice(0, 80) : "Untitled",
+    nodes,
+  };
+}
+export function buildGeometries(doc) {
+  doc = validateDocument(doc);
+  const result = new Map(),
+    byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  function build(id) {
+    if (result.has(id)) return result.get(id);
+    const n = byId.get(id),
+      p = n.params;
+    let g;
+    if (n.type === "box") {
+      g = new THREE.BoxGeometry(p.width, p.depth, p.height);
+      g.translate(0, 0, p.height / 2);
+    } else if (n.type === "cylinder") {
+      g = new THREE.CylinderGeometry(p.radius, p.radius, p.height, 32);
+      g.rotateX(Math.PI / 2);
+      g.translate(0, 0, p.height / 2);
+    } else if (n.type === "sphere") {
+      g = new THREE.SphereGeometry(p.radius, 24, 12);
+      g.translate(0, 0, p.radius);
+    } else if (n.type === "extrude") {
+      const shape = new THREE.Shape(
+        p.profile.map((v) => new THREE.Vector2(...v)),
+      );
+      g = new THREE.ExtrudeGeometry(shape, {
+        depth: p.height,
+        bevelEnabled: false,
+        steps: 1,
+      });
+    } else g = booleanGeometry(build(p.a), build(p.b), p.operation);
+    const q = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(...n.rotation.map(THREE.MathUtils.degToRad)),
+    );
+    g.applyMatrix4(
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(...n.position),
+        q,
+        new THREE.Vector3(1, 1, 1),
+      ),
+    );
+    g.computeBoundingBox();
+    result.set(id, g);
+    return g;
+  }
+  doc.nodes.forEach((n) => build(n.id));
+  return result;
+}
+export class History {
+  constructor(doc = { version: 1, name: "Untitled", nodes: [] }) {
+    this.doc = validateDocument(doc);
+    this.past = [];
+    this.future = [];
+  }
+  apply(change) {
+    const next = clone(this.doc);
+    change(next);
+    const valid = validateDocument(next);
+    this.past.push(this.doc);
+    if (this.past.length > 50) this.past.shift();
+    this.doc = valid;
+    this.future = [];
+    return this.doc;
+  }
+  undo() {
+    if (!this.past.length) return;
+    this.future.push(this.doc);
+    this.doc = this.past.pop();
+  }
+  redo() {
+    if (!this.future.length) return;
+    this.past.push(this.doc);
+    this.doc = this.future.pop();
+  }
+}
+export function sample() {
+  const a = makeNode("box", "base");
+  a.name = "Mounting block";
+  a.params = { width: 50, depth: 35, height: 14 };
+  a.position = [0, 0, 0];
+  a.visible = false;
+  const b = makeNode("cylinder", "bore");
+  b.name = "Bore tool";
+  b.params = { radius: 7, height: 20 };
+  b.position = [0, 0, -3];
+  b.visible = false;
+  const c = makeNode("boolean", "cut");
+  c.name = "Block with bore";
+  c.params = { operation: "cut", a: "base", b: "bore" };
+  const d = makeNode("extrude", "bracket");
+  d.name = "L profile extrusion";
+  d.position = [33, -15, 0];
+  d.params.height = 20;
+  d.color = "#d6aa64";
+  return {
+    version: 1,
+    name: "Parametric mounting assembly",
+    nodes: [a, b, c, d],
+  };
+}

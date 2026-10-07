@@ -1,18 +1,153 @@
-import {test} from 'node:test';import assert from 'node:assert/strict';import * as THREE from 'three';
-import {booleanGeometry,meshVolume} from '../src/csg.js';import {History,makeNode,sample,buildGeometries,validateDocument,validateProfile} from '../src/model.js';
-function box(x=0){const g=new THREE.BoxGeometry(10,10,10);g.translate(x,0,0);return g;}function near(a,b,tol=.001){assert.ok(Math.abs(a-b)<tol,`${a} differs from ${b}`);}
-test('Boolean union cut and intersection preserve expected volumes',()=>{for(const [op,v]of [['union',1500],['cut',500],['intersection',500]])near(meshVolume(booleanGeometry(box(),box(5),op)),v);});
-test('disjoint solids and identical operands',()=>{near(meshVolume(booleanGeometry(box(),box(30),'union')),2000);near(meshVolume(booleanGeometry(box(),box(30),'cut')),1000);near(meshVolume(booleanGeometry(box(),box(30),'intersection')),0);near(meshVolume(booleanGeometry(box(),box(),'cut')),0);near(meshVolume(booleanGeometry(box(),box(),'intersection')),1000);});
-test('nested cutter creates cavity',()=>{const inner=new THREE.BoxGeometry(4,4,4);near(meshVolume(booleanGeometry(box(),inner,'cut')),936);});
-test('all primitive geometries have finite nonzero volume',()=>{for(const type of ['box','cylinder','sphere','extrude']){const n=makeNode(type,type);const g=buildGeometries({version:1,name:'Test',nodes:[n]}).get(type);assert.ok(meshVolume(g)>1);const a=g.getAttribute('position').array;assert.ok(Array.from(a).every(Number.isFinite));}});
-test('sample cut recomputes after base parameter change',()=>{const d=sample(),first=meshVolume(buildGeometries(d).get('cut'));d.nodes[0].params.width=60;const second=meshVolume(buildGeometries(d).get('cut'));near(second-first,4900,.05);});
-test('placement and rotation update bounds',()=>{const n=makeNode('box','a');n.params={width:10,depth:20,height:30};n.position=[5,6,7];n.rotation=[0,0,90];const b=buildGeometries({version:1,name:'x',nodes:[n]}).get('a').boundingBox;near(b.max.z,37);near(b.max.x-b.min.x,20);});
-test('concave sketch and crossing validation',()=>{assert.ok(validateProfile([[0,0],[20,0],[20,10],[10,10],[10,20],[0,20]]));assert.throws(()=>validateProfile([[0,0],[10,10],[0,10],[10,0]]));assert.throws(()=>validateProfile([[0,0],[0,0],[10,0]]));});
-test('history undo redo and branching',()=>{const h=new History();h.apply(d=>d.nodes.push(makeNode('box','a')));h.undo();assert.equal(h.doc.nodes.length,0);h.redo();assert.equal(h.doc.nodes.length,1);h.undo();h.apply(d=>d.name='Branched');assert.equal(h.future.length,0);});
-test('invalid input never changes history',()=>{const h=new History(sample()),before=JSON.stringify(h.doc);assert.throws(()=>h.apply(d=>d.nodes[0].params.height=-1));assert.equal(JSON.stringify(h.doc),before);assert.equal(h.past.length,0);});
-test('reject missing operands cycles and duplicate identifiers',()=>{const d=sample();d.nodes[2].params.a='missing';assert.throws(()=>validateDocument(d));const e=sample();e.nodes[2].params.a='cut';assert.throws(()=>validateDocument(e));const f=sample();f.nodes[1].id='base';assert.throws(()=>validateDocument(f));});
-test('reject nonfinite and oversized documents',()=>{const d=sample();d.nodes[0].position[0]=Infinity;assert.throws(()=>validateDocument(d));const h={version:1,name:'x',nodes:Array.from({length:41},(_,i)=>makeNode('box','x'+i))};assert.throws(()=>validateDocument(h));});
-test('JSON roundtrip preserves parametric document',()=>{const d=sample();assert.deepEqual(validateDocument(JSON.parse(JSON.stringify(d))),d);});
-test('sphere box Boolean completes with finite volume',()=>{const n=makeNode('sphere','s'),d={version:1,name:'s',nodes:[n]},g=buildGeometries(d).get('s');const result=booleanGeometry(g,box(),'cut');assert.ok(meshVolume(result)>0);assert.ok(meshVolume(result)<meshVolume(g));});
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as THREE from "three";
+import { booleanGeometry, meshVolume } from "../src/csg.js";
+import {
+  History,
+  makeNode,
+  sample,
+  buildGeometries,
+  validateDocument,
+  validateProfile,
+} from "../src/model.js";
+function box(x = 0) {
+  const g = new THREE.BoxGeometry(10, 10, 10);
+  g.translate(x, 0, 0);
+  return g;
+}
+function near(a, b, tol = 0.001) {
+  assert.ok(Math.abs(a - b) < tol, `${a} differs from ${b}`);
+}
+test("Boolean union cut and intersection preserve expected volumes", () => {
+  for (const [op, v] of [
+    ["union", 1500],
+    ["cut", 500],
+    ["intersection", 500],
+  ])
+    near(meshVolume(booleanGeometry(box(), box(5), op)), v);
+});
+test("disjoint solids and identical operands", () => {
+  near(meshVolume(booleanGeometry(box(), box(30), "union")), 2000);
+  near(meshVolume(booleanGeometry(box(), box(30), "cut")), 1000);
+  near(meshVolume(booleanGeometry(box(), box(30), "intersection")), 0);
+  near(meshVolume(booleanGeometry(box(), box(), "cut")), 0);
+  near(meshVolume(booleanGeometry(box(), box(), "intersection")), 1000);
+});
+test("nested cutter creates cavity", () => {
+  const inner = new THREE.BoxGeometry(4, 4, 4);
+  near(meshVolume(booleanGeometry(box(), inner, "cut")), 936);
+});
+test("all primitive geometries have finite nonzero volume", () => {
+  for (const type of ["box", "cylinder", "sphere", "extrude"]) {
+    const n = makeNode(type, type);
+    const g = buildGeometries({ version: 1, name: "Test", nodes: [n] }).get(
+      type,
+    );
+    assert.ok(meshVolume(g) > 1);
+    const a = g.getAttribute("position").array;
+    assert.ok(Array.from(a).every(Number.isFinite));
+  }
+});
+test("sample cut recomputes after base parameter change", () => {
+  const d = sample(),
+    first = meshVolume(buildGeometries(d).get("cut"));
+  d.nodes[0].params.width = 60;
+  const second = meshVolume(buildGeometries(d).get("cut"));
+  near(second - first, 4900, 0.05);
+});
+test("placement and rotation update bounds", () => {
+  const n = makeNode("box", "a");
+  n.params = { width: 10, depth: 20, height: 30 };
+  n.position = [5, 6, 7];
+  n.rotation = [0, 0, 90];
+  const b = buildGeometries({ version: 1, name: "x", nodes: [n] }).get(
+    "a",
+  ).boundingBox;
+  near(b.max.z, 37);
+  near(b.max.x - b.min.x, 20);
+});
+test("concave sketch and crossing validation", () => {
+  assert.ok(
+    validateProfile([
+      [0, 0],
+      [20, 0],
+      [20, 10],
+      [10, 10],
+      [10, 20],
+      [0, 20],
+    ]),
+  );
+  assert.throws(() =>
+    validateProfile([
+      [0, 0],
+      [10, 10],
+      [0, 10],
+      [10, 0],
+    ]),
+  );
+  assert.throws(() =>
+    validateProfile([
+      [0, 0],
+      [0, 0],
+      [10, 0],
+    ]),
+  );
+});
+test("history undo redo and branching", () => {
+  const h = new History();
+  h.apply((d) => d.nodes.push(makeNode("box", "a")));
+  h.undo();
+  assert.equal(h.doc.nodes.length, 0);
+  h.redo();
+  assert.equal(h.doc.nodes.length, 1);
+  h.undo();
+  h.apply((d) => (d.name = "Branched"));
+  assert.equal(h.future.length, 0);
+});
+test("invalid input never changes history", () => {
+  const h = new History(sample()),
+    before = JSON.stringify(h.doc);
+  assert.throws(() => h.apply((d) => (d.nodes[0].params.height = -1)));
+  assert.equal(JSON.stringify(h.doc), before);
+  assert.equal(h.past.length, 0);
+});
+test("reject missing operands cycles and duplicate identifiers", () => {
+  const d = sample();
+  d.nodes[2].params.a = "missing";
+  assert.throws(() => validateDocument(d));
+  const e = sample();
+  e.nodes[2].params.a = "cut";
+  assert.throws(() => validateDocument(e));
+  const f = sample();
+  f.nodes[1].id = "base";
+  assert.throws(() => validateDocument(f));
+});
+test("reject nonfinite and oversized documents", () => {
+  const d = sample();
+  d.nodes[0].position[0] = Infinity;
+  assert.throws(() => validateDocument(d));
+  const h = {
+    version: 1,
+    name: "x",
+    nodes: Array.from({ length: 41 }, (_, i) => makeNode("box", "x" + i)),
+  };
+  assert.throws(() => validateDocument(h));
+});
+test("JSON roundtrip preserves parametric document", () => {
+  const d = sample();
+  assert.deepEqual(validateDocument(JSON.parse(JSON.stringify(d))), d);
+});
+test("sphere box Boolean completes with finite volume", () => {
+  const n = makeNode("sphere", "s"),
+    d = { version: 1, name: "s", nodes: [n] },
+    g = buildGeometries(d).get("s");
+  const result = booleanGeometry(g, box(), "cut");
+  assert.ok(meshVolume(result) > 0);
+  assert.ok(meshVolume(result) < meshVolume(g));
+});
 
-test('reject unknown parameter keys from imported documents',()=>{const d=sample();d.nodes[0].params['unexpected']=1;assert.throws(()=>validateDocument(d));});
+test("reject unknown parameter keys from imported documents", () => {
+  const d = sample();
+  d.nodes[0].params["unexpected"] = 1;
+  assert.throws(() => validateDocument(d));
+});

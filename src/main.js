@@ -1,63 +1,676 @@
-import * as THREE from 'three';
-import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import {STLExporter} from 'three/addons/exporters/STLExporter.js';
-import {OBJExporter} from 'three/addons/exporters/OBJExporter.js';
-import {History,makeNode,buildGeometries,validateDocument,validateProfile,sample} from './model.js';
-import {meshVolume} from './csg.js';
-import './style.css';
-const $=id=>document.getElementById(id),escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-document.querySelector('#app').innerHTML=`<header><b class="logo">W<span>CAD</span></b><span>Parametric mesh workbench</span><div class="file"><button id="new">New</button><button id="open">Open JSON</button><button id="save">Save project</button><button id="sample">Sample</button></div></header><div class="ribbon"><div><small>CREATE</small><button data-add="box">▣ Box</button><button data-add="cylinder">◉ Cylinder</button><button data-add="sphere">● Sphere</button><button id="sketch">▱ Sketch & pad</button></div><div><small>PART OPERATIONS</small><button data-boolean="union">Union</button><button data-boolean="cut">Cut A − B</button><button data-boolean="intersection">Intersect</button><button id="duplicate">Duplicate</button></div><div><small>HISTORY</small><button id="undo">↶ Undo</button><button id="redo">↷ Redo</button><button id="delete">Delete</button></div></div><main><aside id="left"><h2>MODEL TREE</h2><div id="document-name"></div><p class="hint">Shift-click to select two operands.<br>First selection is A, second is B.</p><div id="tree"></div><div class="legend"><b>Document units: mm</b><p>XY sketch plane · Z up<br>Dimensions are parametric.<br>Curves are tessellated.</p></div></aside><section id="workspace"><div class="views"><button data-view="iso">Isometric</button><button data-view="top">Top</button><button data-view="front">Front</button><button data-view="right">Right</button><button id="fit">Fit all</button><button id="projection">Orthographic</button><button id="wire">Wireframe</button><button id="grid">Grid</button><button id="measure">Measure</button><label>Section Z <input id="section" type="range" min="-50" max="80" value="80"><input id="clip" type="checkbox" aria-label="Enable section view"></label></div><div id="viewport"><canvas id="view" aria-label="Interactive CAD viewport"></canvas><div id="viewport-label">ISOMETRIC · PERSPECTIVE</div><div id="measurement"></div><div id="axis">X <i>Y</i> <b>Z</b></div></div><div id="console" role="status">Ready. Orbit: left drag. Pan: right drag. Zoom: wheel.</div></section><aside id="right"><h2>PROPERTY EDITOR</h2><div id="properties"></div><h2>EXPORT</h2><div class="exports"><button data-export="stl">STL mesh</button><button data-export="obj">OBJ mesh</button><button data-export="png">Viewport PNG</button></div><p class="hint">Exports contain visible geometry.<br>Section cuts are display only.</p><div id="metrics"></div></aside></main><footer><span id="status"></span><span>Browser mesh CAD · no STEP / B-rep</span></footer><input id="file" type="file" accept=".json,application/json" hidden><dialog id="sketch-dialog"><div class="dialog-head"><h2>XY polygon sketch</h2><button id="cancel-sketch">Close</button></div><p>Click vertices on the grid (1 mm snap). Create a simple closed profile, then Pad. Maximum 64 vertices.</p><canvas id="sketch-canvas" width="600" height="420"></canvas><div class="dialog-actions"><button id="remove-point">Remove last</button><button id="clear-sketch">Clear</button><label>Pad height <input id="pad-height" type="number" min="0.1" max="1000" value="12"> mm</label><button id="pad">Pad profile</button></div><p id="sketch-status"></p></dialog>`;
-let history=new History(sample()),selection=[],geometries=new Map(),meshById=new Map(),counter=0,measurementMode=false,measurePoints=[],wire=false,orthographic=false,viewName='ISOMETRIC',sketchPoints=[],sketchEditing=null;
-try{const saved=localStorage.getItem('webcad-autosave');if(saved){const valid=validateDocument(JSON.parse(saved)),preflight=buildGeometries(valid);for(const g of preflight.values())g.dispose();history=new History(valid);}}catch{}
-const scene=new THREE.Scene();scene.background=new THREE.Color('#dfe7ec');const solids=new THREE.Group(),decorations=new THREE.Group();scene.add(solids,decorations);scene.add(new THREE.HemisphereLight(0xffffff,0x617582,2));const sun=new THREE.DirectionalLight(0xffffff,3);sun.position.set(80,-100,150);scene.add(sun);
-const grid=new THREE.GridHelper(200,40,0x899da8,0xb8c7ce);grid.rotateX(Math.PI/2);scene.add(grid);scene.add(new THREE.AxesHelper(30));
-let renderer;try{renderer=new THREE.WebGLRenderer({canvas:$('view'),antialias:true,preserveDrawingBuffer:true});}catch(e){$('console').textContent='WebGL unavailable. Enable hardware acceleration and reload.';throw e;}renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.localClippingEnabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;
-let camera=new THREE.PerspectiveCamera(45,1,.1,10000);camera.up.set(0,0,1);camera.position.set(105,-130,110);let controls=new OrbitControls(camera,$('view'));controls.target.set(15,0,12);controls.enableDamping=true;
-const sectionPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),80),raycaster=new THREE.Raycaster();
-function tell(message,error=false){$('console').textContent=message;$('console').classList.toggle('error',error);}
-function nextId(){let id;do{id=`part-${++counter}`;}while(history.doc.nodes.some(n=>n.id===id));return id;}
-function disposeMaps(map){for(const g of map.values())g.dispose();}
-function change(callback){try{const next=structuredClone(history.doc);callback(next);const valid=validateDocument(next),preview=buildGeometries(valid);disposeMaps(preview);history.apply(d=>Object.assign(d,valid));refresh();tell('Document updated.');}catch(e){tell(e.message,true);}}
-function refresh(){selection=selection.filter(id=>history.doc.nodes.some(n=>n.id===id));for(const m of [...solids.children]){m.material.dispose();solids.remove(m);}disposeMaps(geometries);geometries=buildGeometries(history.doc);meshById.clear();
- for(const n of history.doc.nodes){const material=new THREE.MeshStandardMaterial({color:selection.includes(n.id)?'#e3b849':n.color,metalness:.1,roughness:.45,wireframe:wire,clippingPlanes:$('clip').checked?[sectionPlane]:[]});const mesh=new THREE.Mesh(geometries.get(n.id),material);mesh.name=n.name;mesh.visible=n.visible;mesh.userData.id=n.id;solids.add(mesh);meshById.set(n.id,mesh);}
- clearMeasurement();renderTree();renderProperties();$('document-name').textContent=history.doc.name;$('undo').disabled=!history.past.length;$('redo').disabled=!history.future.length;$('status').textContent=`${history.doc.nodes.length} features · ${selection.length} selected · mm`;
- try{localStorage.setItem('webcad-autosave',JSON.stringify(history.doc));}catch{} }
-function select(id,add=false){selection=add?(selection.includes(id)?selection.filter(x=>x!==id):[...selection,id]):[id];if(selection.length>2)selection=selection.slice(-2);for(const [id,m] of meshById){const n=history.doc.nodes.find(n=>n.id===id);m.material.color.set(selection.includes(id)?'#e3b849':n.color);}renderTree();renderProperties();$('status').textContent=`${history.doc.nodes.length} features · ${selection.length} selected · mm`;}
-function renderTree(){$('tree').innerHTML=history.doc.nodes.map(n=>`<div class="tree-row ${selection.includes(n.id)?'selected':''}"><input type="checkbox" aria-label="Visibility ${escape(n.name)}" data-visible="${n.id}" ${n.visible?'checked':''}><button data-select="${n.id}"><span>${n.type==='boolean'?'◈':n.type==='extrude'?'▱':'▣'}</span>${escape(n.name)}<small>${escape(n.type==='boolean'?n.params.operation:n.type)}</small></button></div>`).join('');for(const b of document.querySelectorAll('[data-select]'))b.onclick=e=>select(b.dataset.select,e.shiftKey);for(const box of document.querySelectorAll('[data-visible]'))box.onchange=()=>change(d=>d.nodes.find(n=>n.id===box.dataset.visible).visible=box.checked);}
-function field(label,key,value,type='number'){return `<label>${escape(label)}<input data-property="${key}" type="${type}" value="${escape(value)}" ${type==='number'?'step="0.5"':''}></label>`;}
-function renderProperties(){const n=selection.length===1?history.doc.nodes.find(n=>n.id===selection[0]):null;if(!n){$('properties').innerHTML=`<p class="hint">${selection.length===2?'Two operands selected. Choose a Boolean operation.':'Select an object to edit its parameters.'}</p>`;$('metrics').textContent='';return;}
- let html=field('Name','name',n.name,'text')+field('Color','color',n.color,'color')+'<h3>Placement</h3>';for(const [i,axis]of ['X','Y','Z'].entries())html+=field(`${axis} position (mm)`,`position.${i}`,n.position[i]);for(const [i,axis]of ['X','Y','Z'].entries())html+=field(`${axis} rotation (°)`,`rotation.${i}`,n.rotation[i]);html+='<h3>Parameters</h3>';
- for(const [key,v]of Object.entries(n.params))if(typeof v==='number')html+=field(`${key} (mm)`,`params.${key}`,v);
- if(n.type==='extrude')html+='<button id="edit-sketch">Edit profile vertices</button>';
- if(n.type==='boolean')html+=`<p class="hint">${escape(n.params.operation)}<br>A: ${escape(n.params.a)}<br>B: ${escape(n.params.b)}<br>Source edits recompute this result.</p>`;
- $('properties').innerHTML=html;for(const input of document.querySelectorAll('[data-property]'))input.onchange=()=>{const value=input.type==='number'?Number(input.value):input.value;change(d=>{const target=d.nodes.find(a=>a.id===n.id),keys=input.dataset.property.split('.');if(keys.length===1)target[keys[0]]=value;else target[keys[0]][keys[1]]=value;});};if($('edit-sketch'))$('edit-sketch').onclick=()=>openSketch(n);
- const g=geometries.get(n.id),box=g.boundingBox,dimensions=box.isEmpty()?new THREE.Vector3():box.getSize(new THREE.Vector3());$('metrics').innerHTML=`<h3>Computed mesh</h3><p>Bounds: ${dimensions.toArray().map(x=>x.toFixed(2)).join(' × ')} mm</p><p>Approx. volume: ${meshVolume(g).toFixed(2)} mm³</p><p>Triangles: ${g.index?g.index.count/3:g.getAttribute('position').count/3}</p>`;}
-for(const b of document.querySelectorAll('[data-add]'))b.onclick=()=>{const n=makeNode(b.dataset.add,nextId());n.position=[10,0,0];change(d=>d.nodes.push(n));select(n.id);};
-for(const b of document.querySelectorAll('[data-boolean]'))b.onclick=()=>{if(selection.length!==2){tell('Select exactly two objects (Shift-click). First is A, second is B.',true);return;}const n=makeNode('boolean',nextId());n.name=b.dataset.boolean[0].toUpperCase()+b.dataset.boolean.slice(1);n.params={operation:b.dataset.boolean,a:selection[0],b:selection[1]};change(d=>{d.nodes.filter(x=>selection.includes(x.id)).forEach(x=>x.visible=false);d.nodes.push(n);});if(history.doc.nodes.some(x=>x.id===n.id))select(n.id);};
-$('duplicate').onclick=()=>{if(selection.length!==1)return tell('Select one feature to duplicate.',true);const n=structuredClone(history.doc.nodes.find(n=>n.id===selection[0]));n.id=nextId();n.name+=' copy';n.position[0]+=15;change(d=>d.nodes.push(n));if(history.doc.nodes.some(x=>x.id===n.id))select(n.id);};
-$('delete').onclick=()=>{if(!selection.length)return;change(d=>{for(const n of d.nodes)if(n.type==='boolean'&&!selection.includes(n.id)&&(selection.includes(n.params.a)||selection.includes(n.params.b)))throw Error('Delete dependent Boolean features first.');const deleted=d.nodes.filter(n=>selection.includes(n.id));d.nodes=d.nodes.filter(n=>!selection.includes(n.id));for(const n of deleted)if(n.type==='boolean')for(const id of [n.params.a,n.params.b]){const source=d.nodes.find(n=>n.id===id);if(source)source.visible=true;}});};
-function undo(){history.undo();refresh();tell('Undo');}function redo(){history.redo();refresh();tell('Redo');}$('undo').onclick=undo;$('redo').onclick=redo;
-function load(doc){const valid=validateDocument(doc),preview=buildGeometries(valid);disposeMaps(preview);history.apply(d=>Object.assign(d,valid));selection=[];refresh();fit();}
-$('new').onclick=()=>{try{load({version:1,name:'Untitled',nodes:[]});tell('New document. Undo restores your previous work.');}catch(e){tell(e.message,true);}};$('sample').onclick=()=>{try{load(sample());tell('Loaded parametric example.');}catch(e){tell(e.message,true);}};$('open').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{if(f.size>2000000)throw Error('Project exceeds 2 MB limit');load(JSON.parse(await f.text()));tell(`Opened ${f.name}`);}catch(e){tell(`Import failed: ${e.message}`,true);}e.target.value='';};
-function download(content,name,type){const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-$('save').onclick=()=>download(JSON.stringify(history.doc,null,2),'web-cad-project.json','application/json');
-for(const b of document.querySelectorAll('[data-export]'))b.onclick=()=>{try{const type=b.dataset.export;if(type==='png'){renderer.render(scene,camera);const a=document.createElement('a');a.href=renderer.domElement.toDataURL('image/png');a.download='web-cad-viewport.png';a.click();return;}
- const group=new THREE.Group();for(const n of history.doc.nodes)if(n.visible){const mesh=new THREE.Mesh(geometries.get(n.id),new THREE.MeshBasicMaterial());mesh.name=n.name;group.add(mesh);}if(!group.children.length)throw Error('No visible solids to export');group.updateMatrixWorld(true);const content=type==='stl'?new STLExporter().parse(group):new OBJExporter().parse(group);group.children.forEach(m=>m.material.dispose());download(content,`web-cad-mesh.${type}`,'text/plain');tell(`Exported visible geometry as ${type.toUpperCase()}.`);}catch(e){tell(e.message,true);}};
-function bounds(){const box=new THREE.Box3();for(const n of history.doc.nodes)if(n.visible&&!geometries.get(n.id).boundingBox.isEmpty())box.union(geometries.get(n.id).boundingBox);return box.isEmpty()?new THREE.Box3(new THREE.Vector3(-20,-20,0),new THREE.Vector3(20,20,20)):box;}
-function fit(direction=null){const box=bounds(),center=box.getCenter(new THREE.Vector3()),radius=Math.max(15,box.getSize(new THREE.Vector3()).length()*.65);const dir=direction||camera.position.clone().sub(controls.target).normalize();controls.target.copy(center);camera.position.copy(center).addScaledVector(dir,radius*2.6);if(orthographic){camera.zoom=90/radius;camera.updateProjectionMatrix();}controls.update();}
-$('fit').onclick=()=>fit();for(const b of document.querySelectorAll('[data-view]'))b.onclick=()=>{viewName=b.dataset.view.toUpperCase();const dirs={iso:new THREE.Vector3(1,-1,1).normalize(),top:new THREE.Vector3(0,-.0001,1).normalize(),front:new THREE.Vector3(0,-1,.0001),right:new THREE.Vector3(1,0,.0001)};fit(dirs[b.dataset.view]);labelView();};
-function labelView(){$('viewport-label').textContent=`${viewName} · ${orthographic?'ORTHOGRAPHIC':'PERSPECTIVE'}`;}
-$('projection').onclick=()=>{const position=camera.position.clone(),target=controls.target.clone();orthographic=!orthographic;controls.dispose();camera=orthographic?new THREE.OrthographicCamera(-100,100,100,-100,.1,10000):new THREE.PerspectiveCamera(45,1,.1,10000);camera.up.set(0,0,1);camera.position.copy(position);controls=new OrbitControls(camera,$('view'));controls.enableDamping=true;controls.target.copy(target);$('projection').textContent=orthographic?'Perspective':'Orthographic';resize();fit();labelView();};
-$('wire').onclick=()=>{wire=!wire;for(const m of meshById.values())m.material.wireframe=wire;$('wire').classList.toggle('active',wire);};$('grid').onclick=()=>{grid.visible=!grid.visible;};$('clip').onchange=()=>{for(const m of meshById.values())m.material.clippingPlanes=$('clip').checked?[sectionPlane]:[];};$('section').oninput=()=>{sectionPlane.constant=Number($('section').value);};
-function clearMeasurement(){measurePoints=[];$('measurement').textContent='';for(const m of [...decorations.children]){m.geometry?.dispose();m.material?.dispose();decorations.remove(m);}}
-$('measure').onclick=()=>{measurementMode=!measurementMode;clearMeasurement();$('measure').classList.toggle('active',measurementMode);tell(measurementMode?'Click two visible surfaces to measure their distance.':'Measurement mode disabled.');};
-let down=null;$('view').addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY];});$('view').addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const rect=$('view').getBoundingClientRect();raycaster.setFromCamera(new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1),camera);const hits=raycaster.intersectObjects([...meshById.values()].filter(m=>m.visible));const hit=hits.find(h=>!$('clip').checked||sectionPlane.distanceToPoint(h.point)>=0);if(!hit)return;if(!measurementMode){select(hit.object.userData.id,e.shiftKey);return;}if(measurePoints.length===2)clearMeasurement();measurePoints.push(hit.point.clone());const dot=new THREE.Mesh(new THREE.SphereGeometry(.65,10,8),new THREE.MeshBasicMaterial({color:0xc63043}));dot.position.copy(hit.point);decorations.add(dot);if(measurePoints.length===2){const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints(measurePoints),new THREE.LineBasicMaterial({color:0xc63043}));decorations.add(line);$('measurement').textContent=`Distance ${measurePoints[0].distanceTo(measurePoints[1]).toFixed(3)} mm`;}});
-function resize(){const r=$('viewport').getBoundingClientRect();renderer.setSize(r.width,r.height,false);if(orthographic){const aspect=r.width/r.height;camera.left=-100*aspect;camera.right=100*aspect;}else camera.aspect=r.width/r.height;camera.updateProjectionMatrix();}new ResizeObserver(resize).observe($('viewport'));
-function openSketch(node=null){sketchEditing=node?.id||null;sketchPoints=node?structuredClone(node.params.profile):[];$('pad-height').value=node?node.params.height:12;$('sketch-dialog').showModal();drawSketch();}
-$('sketch').onclick=()=>openSketch();$('cancel-sketch').onclick=()=>$('sketch-dialog').close();const sketchContext=$('sketch-canvas').getContext('2d');
-function drawSketch(){const c=sketchContext;c.fillStyle='#f4f7fa';c.fillRect(0,0,600,420);c.strokeStyle='#dbe2e7';c.lineWidth=1;for(let x=0;x<=600;x+=10){c.beginPath();c.moveTo(x,0);c.lineTo(x,420);c.stroke();}for(let y=0;y<=420;y+=10){c.beginPath();c.moveTo(0,y);c.lineTo(600,y);c.stroke();}c.strokeStyle='#91a5b2';c.beginPath();c.moveTo(300,0);c.lineTo(300,420);c.moveTo(0,210);c.lineTo(600,210);c.stroke();c.strokeStyle='#0576b3';c.lineWidth=2;c.beginPath();sketchPoints.forEach((p,i)=>i?c.lineTo(300+p[0]*10,210-p[1]*10):c.moveTo(300+p[0]*10,210-p[1]*10));if(sketchPoints.length>2)c.closePath();c.stroke();c.fillStyle='#d44d27';sketchPoints.forEach(p=>{c.beginPath();c.arc(300+p[0]*10,210-p[1]*10,4,0,Math.PI*2);c.fill();});$('sketch-status').textContent=`${sketchPoints.length} vertices · XY coordinates in mm · no constraint solver`;}
-$('sketch-canvas').onclick=e=>{if(sketchPoints.length>=64)return;const rect=e.target.getBoundingClientRect(),x=(e.clientX-rect.left)*600/rect.width,y=(e.clientY-rect.top)*420/rect.height;const p=[Math.round((x-300)/10),Math.round((210-y)/10)];if(sketchPoints.length&&sketchPoints.at(-1).every((v,i)=>v===p[i]))return;sketchPoints.push(p);drawSketch();};$('remove-point').onclick=()=>{sketchPoints.pop();drawSketch();};$('clear-sketch').onclick=()=>{sketchPoints=[];drawSketch();};
-$('pad').onclick=()=>{try{validateProfile(sketchPoints);const height=Number($('pad-height').value),id=sketchEditing||nextId();const node=makeNode('extrude',id);node.params={height,profile:structuredClone(sketchPoints)};const before=history.doc;change(d=>{const existing=d.nodes.find(n=>n.id===id);if(existing)existing.params=node.params;else d.nodes.push(node);});if(history.doc!==before){$('sketch-dialog').close();select(id);fit();}else $('sketch-status').textContent=$('console').textContent;}catch(e){$('sketch-status').textContent=e.message;}};
-addEventListener('keydown',e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||$('sketch-dialog').open)return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();$('save').click();}if(e.key==='Delete')$('delete').click();});
-refresh();resize();fit();function animate(){controls.update();renderer.render(scene,camera);requestAnimationFrame(animate);}animate();
-window.cadDiagnostics=()=>({nodes:history.doc.nodes.length,selected:[...selection],webgl:!!renderer.getContext(),visible:history.doc.nodes.filter(n=>n.visible).length,history:history.past.length});
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { STLExporter } from "three/addons/exporters/STLExporter.js";
+import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
+import {
+  History,
+  makeNode,
+  buildGeometries,
+  validateDocument,
+  validateProfile,
+  sample,
+} from "./model.js";
+import { meshVolume } from "./csg.js";
+import "./style.css";
+const $ = (id) => document.getElementById(id),
+  escape = (s) =>
+    String(s).replace(
+      /[&<>"']/g,
+      (c) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[c],
+    );
+document.querySelector("#app").innerHTML =
+  `<header><b class="logo">W<span>CAD</span></b><span>Parametric mesh workbench</span><div class="file"><button id="new">New</button><button id="open">Open JSON</button><button id="save">Save project</button><button id="sample">Sample</button></div></header><div class="ribbon"><div><small>CREATE</small><button data-add="box">▣ Box</button><button data-add="cylinder">◉ Cylinder</button><button data-add="sphere">● Sphere</button><button id="sketch">▱ Sketch & pad</button></div><div><small>PART OPERATIONS</small><button data-boolean="union">Union</button><button data-boolean="cut">Cut A − B</button><button data-boolean="intersection">Intersect</button><button id="duplicate">Duplicate</button></div><div><small>HISTORY</small><button id="undo">↶ Undo</button><button id="redo">↷ Redo</button><button id="delete">Delete</button></div></div><main><aside id="left"><h2>MODEL TREE</h2><div id="document-name"></div><p class="hint">Shift-click to select two operands.<br>First selection is A, second is B.</p><div id="tree"></div><div class="legend"><b>Document units: mm</b><p>XY sketch plane · Z up<br>Dimensions are parametric.<br>Curves are tessellated.</p></div></aside><section id="workspace"><div class="views"><button data-view="iso">Isometric</button><button data-view="top">Top</button><button data-view="front">Front</button><button data-view="right">Right</button><button id="fit">Fit all</button><button id="projection">Orthographic</button><button id="wire">Wireframe</button><button id="grid">Grid</button><button id="measure">Measure</button><label>Section Z <input id="section" type="range" min="-50" max="80" value="80"><input id="clip" type="checkbox" aria-label="Enable section view"></label></div><div id="viewport"><canvas id="view" aria-label="Interactive CAD viewport"></canvas><div id="viewport-label">ISOMETRIC · PERSPECTIVE</div><div id="measurement"></div><div id="axis">X <i>Y</i> <b>Z</b></div></div><div id="console" role="status">Ready. Orbit: left drag. Pan: right drag. Zoom: wheel.</div></section><aside id="right"><h2>PROPERTY EDITOR</h2><div id="properties"></div><h2>EXPORT</h2><div class="exports"><button data-export="stl">STL mesh</button><button data-export="obj">OBJ mesh</button><button data-export="png">Viewport PNG</button></div><p class="hint">Exports contain visible geometry.<br>Section cuts are display only.</p><div id="metrics"></div></aside></main><footer><span id="status"></span><span>Browser mesh CAD · no STEP / B-rep</span></footer><input id="file" type="file" accept=".json,application/json" hidden><dialog id="sketch-dialog"><div class="dialog-head"><h2>XY polygon sketch</h2><button id="cancel-sketch">Close</button></div><p>Click vertices on the grid (1 mm snap). Create a simple closed profile, then Pad. Maximum 64 vertices.</p><canvas id="sketch-canvas" width="600" height="420"></canvas><div class="dialog-actions"><button id="remove-point">Remove last</button><button id="clear-sketch">Clear</button><label>Pad height <input id="pad-height" type="number" min="0.1" max="1000" value="12"> mm</label><button id="pad">Pad profile</button></div><p id="sketch-status"></p></dialog>`;
+let history = new History(sample()),
+  selection = [],
+  geometries = new Map(),
+  meshById = new Map(),
+  counter = 0,
+  measurementMode = false,
+  measurePoints = [],
+  wire = false,
+  orthographic = false,
+  viewName = "ISOMETRIC",
+  sketchPoints = [],
+  sketchEditing = null;
+try {
+  const saved = localStorage.getItem("webcad-autosave");
+  if (saved) {
+    const valid = validateDocument(JSON.parse(saved)),
+      preflight = buildGeometries(valid);
+    for (const g of preflight.values()) g.dispose();
+    history = new History(valid);
+  }
+} catch {}
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#dfe7ec");
+const solids = new THREE.Group(),
+  decorations = new THREE.Group();
+scene.add(solids, decorations);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x617582, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 3);
+sun.position.set(80, -100, 150);
+scene.add(sun);
+const grid = new THREE.GridHelper(200, 40, 0x899da8, 0xb8c7ce);
+grid.rotateX(Math.PI / 2);
+scene.add(grid);
+scene.add(new THREE.AxesHelper(30));
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({
+    canvas: $("view"),
+    antialias: true,
+    preserveDrawingBuffer: true,
+  });
+} catch (e) {
+  $("console").textContent =
+    "WebGL unavailable. Enable hardware acceleration and reload.";
+  throw e;
+}
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.localClippingEnabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+let camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+camera.up.set(0, 0, 1);
+camera.position.set(105, -130, 110);
+let controls = new OrbitControls(camera, $("view"));
+controls.target.set(15, 0, 12);
+controls.enableDamping = true;
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 80),
+  raycaster = new THREE.Raycaster();
+function tell(message, error = false) {
+  $("console").textContent = message;
+  $("console").classList.toggle("error", error);
+}
+function nextId() {
+  let id;
+  do {
+    id = `part-${++counter}`;
+  } while (history.doc.nodes.some((n) => n.id === id));
+  return id;
+}
+function disposeMaps(map) {
+  for (const g of map.values()) g.dispose();
+}
+function change(callback) {
+  try {
+    const next = structuredClone(history.doc);
+    callback(next);
+    const valid = validateDocument(next),
+      preview = buildGeometries(valid);
+    disposeMaps(preview);
+    history.apply((d) => Object.assign(d, valid));
+    refresh();
+    tell("Document updated.");
+  } catch (e) {
+    tell(e.message, true);
+  }
+}
+function refresh() {
+  selection = selection.filter((id) =>
+    history.doc.nodes.some((n) => n.id === id),
+  );
+  for (const m of [...solids.children]) {
+    m.material.dispose();
+    solids.remove(m);
+  }
+  disposeMaps(geometries);
+  geometries = buildGeometries(history.doc);
+  meshById.clear();
+  for (const n of history.doc.nodes) {
+    const material = new THREE.MeshStandardMaterial({
+      color: selection.includes(n.id) ? "#e3b849" : n.color,
+      metalness: 0.1,
+      roughness: 0.45,
+      wireframe: wire,
+      clippingPlanes: $("clip").checked ? [sectionPlane] : [],
+    });
+    const mesh = new THREE.Mesh(geometries.get(n.id), material);
+    mesh.name = n.name;
+    mesh.visible = n.visible;
+    mesh.userData.id = n.id;
+    solids.add(mesh);
+    meshById.set(n.id, mesh);
+  }
+  clearMeasurement();
+  renderTree();
+  renderProperties();
+  $("document-name").textContent = history.doc.name;
+  $("undo").disabled = !history.past.length;
+  $("redo").disabled = !history.future.length;
+  $("status").textContent =
+    `${history.doc.nodes.length} features · ${selection.length} selected · mm`;
+  try {
+    localStorage.setItem("webcad-autosave", JSON.stringify(history.doc));
+  } catch {}
+}
+function select(id, add = false) {
+  selection = add
+    ? selection.includes(id)
+      ? selection.filter((x) => x !== id)
+      : [...selection, id]
+    : [id];
+  if (selection.length > 2) selection = selection.slice(-2);
+  for (const [id, m] of meshById) {
+    const n = history.doc.nodes.find((n) => n.id === id);
+    m.material.color.set(selection.includes(id) ? "#e3b849" : n.color);
+  }
+  renderTree();
+  renderProperties();
+  $("status").textContent =
+    `${history.doc.nodes.length} features · ${selection.length} selected · mm`;
+}
+function renderTree() {
+  $("tree").innerHTML = history.doc.nodes
+    .map(
+      (n) =>
+        `<div class="tree-row ${selection.includes(n.id) ? "selected" : ""}"><input type="checkbox" aria-label="Visibility ${escape(n.name)}" data-visible="${n.id}" ${n.visible ? "checked" : ""}><button data-select="${n.id}"><span>${n.type === "boolean" ? "◈" : n.type === "extrude" ? "▱" : "▣"}</span>${escape(n.name)}<small>${escape(n.type === "boolean" ? n.params.operation : n.type)}</small></button></div>`,
+    )
+    .join("");
+  for (const b of document.querySelectorAll("[data-select]"))
+    b.onclick = (e) => select(b.dataset.select, e.shiftKey);
+  for (const box of document.querySelectorAll("[data-visible]"))
+    box.onchange = () =>
+      change(
+        (d) =>
+          (d.nodes.find((n) => n.id === box.dataset.visible).visible =
+            box.checked),
+      );
+}
+function field(label, key, value, type = "number") {
+  return `<label>${escape(label)}<input data-property="${key}" type="${type}" value="${escape(value)}" ${type === "number" ? 'step="0.5"' : ""}></label>`;
+}
+function renderProperties() {
+  const n =
+    selection.length === 1
+      ? history.doc.nodes.find((n) => n.id === selection[0])
+      : null;
+  if (!n) {
+    $("properties").innerHTML =
+      `<p class="hint">${selection.length === 2 ? "Two operands selected. Choose a Boolean operation." : "Select an object to edit its parameters."}</p>`;
+    $("metrics").textContent = "";
+    return;
+  }
+  let html =
+    field("Name", "name", n.name, "text") +
+    field("Color", "color", n.color, "color") +
+    "<h3>Placement</h3>";
+  for (const [i, axis] of ["X", "Y", "Z"].entries())
+    html += field(`${axis} position (mm)`, `position.${i}`, n.position[i]);
+  for (const [i, axis] of ["X", "Y", "Z"].entries())
+    html += field(`${axis} rotation (°)`, `rotation.${i}`, n.rotation[i]);
+  html += "<h3>Parameters</h3>";
+  for (const [key, v] of Object.entries(n.params))
+    if (typeof v === "number") html += field(`${key} (mm)`, `params.${key}`, v);
+  if (n.type === "extrude")
+    html += '<button id="edit-sketch">Edit profile vertices</button>';
+  if (n.type === "boolean")
+    html += `<p class="hint">${escape(n.params.operation)}<br>A: ${escape(n.params.a)}<br>B: ${escape(n.params.b)}<br>Source edits recompute this result.</p>`;
+  $("properties").innerHTML = html;
+  for (const input of document.querySelectorAll("[data-property]"))
+    input.onchange = () => {
+      const value = input.type === "number" ? Number(input.value) : input.value;
+      change((d) => {
+        const target = d.nodes.find((a) => a.id === n.id),
+          keys = input.dataset.property.split(".");
+        if (keys.length === 1) target[keys[0]] = value;
+        else target[keys[0]][keys[1]] = value;
+      });
+    };
+  if ($("edit-sketch")) $("edit-sketch").onclick = () => openSketch(n);
+  const g = geometries.get(n.id),
+    box = g.boundingBox,
+    dimensions = box.isEmpty()
+      ? new THREE.Vector3()
+      : box.getSize(new THREE.Vector3());
+  $("metrics").innerHTML = `<h3>Computed mesh</h3><p>Bounds: ${dimensions
+    .toArray()
+    .map((x) => x.toFixed(2))
+    .join(
+      " × ",
+    )} mm</p><p>Approx. volume: ${meshVolume(g).toFixed(2)} mm³</p><p>Triangles: ${g.index ? g.index.count / 3 : g.getAttribute("position").count / 3}</p>`;
+}
+for (const b of document.querySelectorAll("[data-add]"))
+  b.onclick = () => {
+    const n = makeNode(b.dataset.add, nextId());
+    n.position = [10, 0, 0];
+    change((d) => d.nodes.push(n));
+    select(n.id);
+  };
+for (const b of document.querySelectorAll("[data-boolean]"))
+  b.onclick = () => {
+    if (selection.length !== 2) {
+      tell(
+        "Select exactly two objects (Shift-click). First is A, second is B.",
+        true,
+      );
+      return;
+    }
+    const n = makeNode("boolean", nextId());
+    n.name = b.dataset.boolean[0].toUpperCase() + b.dataset.boolean.slice(1);
+    n.params = {
+      operation: b.dataset.boolean,
+      a: selection[0],
+      b: selection[1],
+    };
+    change((d) => {
+      d.nodes
+        .filter((x) => selection.includes(x.id))
+        .forEach((x) => (x.visible = false));
+      d.nodes.push(n);
+    });
+    if (history.doc.nodes.some((x) => x.id === n.id)) select(n.id);
+  };
+$("duplicate").onclick = () => {
+  if (selection.length !== 1)
+    return tell("Select one feature to duplicate.", true);
+  const n = structuredClone(
+    history.doc.nodes.find((n) => n.id === selection[0]),
+  );
+  n.id = nextId();
+  n.name += " copy";
+  n.position[0] += 15;
+  change((d) => d.nodes.push(n));
+  if (history.doc.nodes.some((x) => x.id === n.id)) select(n.id);
+};
+$("delete").onclick = () => {
+  if (!selection.length) return;
+  change((d) => {
+    for (const n of d.nodes)
+      if (
+        n.type === "boolean" &&
+        !selection.includes(n.id) &&
+        (selection.includes(n.params.a) || selection.includes(n.params.b))
+      )
+        throw Error("Delete dependent Boolean features first.");
+    const deleted = d.nodes.filter((n) => selection.includes(n.id));
+    d.nodes = d.nodes.filter((n) => !selection.includes(n.id));
+    for (const n of deleted)
+      if (n.type === "boolean")
+        for (const id of [n.params.a, n.params.b]) {
+          const source = d.nodes.find((n) => n.id === id);
+          if (source) source.visible = true;
+        }
+  });
+};
+function undo() {
+  history.undo();
+  refresh();
+  tell("Undo");
+}
+function redo() {
+  history.redo();
+  refresh();
+  tell("Redo");
+}
+$("undo").onclick = undo;
+$("redo").onclick = redo;
+function load(doc) {
+  const valid = validateDocument(doc),
+    preview = buildGeometries(valid);
+  disposeMaps(preview);
+  history.apply((d) => Object.assign(d, valid));
+  selection = [];
+  refresh();
+  fit();
+}
+$("new").onclick = () => {
+  try {
+    load({ version: 1, name: "Untitled", nodes: [] });
+    tell("New document. Undo restores your previous work.");
+  } catch (e) {
+    tell(e.message, true);
+  }
+};
+$("sample").onclick = () => {
+  try {
+    load(sample());
+    tell("Loaded parametric example.");
+  } catch (e) {
+    tell(e.message, true);
+  }
+};
+$("open").onclick = () => $("file").click();
+$("file").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    if (f.size > 2000000) throw Error("Project exceeds 2 MB limit");
+    load(JSON.parse(await f.text()));
+    tell(`Opened ${f.name}`);
+  } catch (e) {
+    tell(`Import failed: ${e.message}`, true);
+  }
+  e.target.value = "";
+};
+function download(content, name, type) {
+  const url = URL.createObjectURL(new Blob([content], { type })),
+    a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+$("save").onclick = () =>
+  download(
+    JSON.stringify(history.doc, null, 2),
+    "web-cad-project.json",
+    "application/json",
+  );
+for (const b of document.querySelectorAll("[data-export]"))
+  b.onclick = () => {
+    try {
+      const type = b.dataset.export;
+      if (type === "png") {
+        renderer.render(scene, camera);
+        const a = document.createElement("a");
+        a.href = renderer.domElement.toDataURL("image/png");
+        a.download = "web-cad-viewport.png";
+        a.click();
+        return;
+      }
+      const group = new THREE.Group();
+      for (const n of history.doc.nodes)
+        if (n.visible) {
+          const mesh = new THREE.Mesh(
+            geometries.get(n.id),
+            new THREE.MeshBasicMaterial(),
+          );
+          mesh.name = n.name;
+          group.add(mesh);
+        }
+      if (!group.children.length) throw Error("No visible solids to export");
+      group.updateMatrixWorld(true);
+      const content =
+        type === "stl"
+          ? new STLExporter().parse(group)
+          : new OBJExporter().parse(group);
+      group.children.forEach((m) => m.material.dispose());
+      download(content, `web-cad-mesh.${type}`, "text/plain");
+      tell(`Exported visible geometry as ${type.toUpperCase()}.`);
+    } catch (e) {
+      tell(e.message, true);
+    }
+  };
+function bounds() {
+  const box = new THREE.Box3();
+  for (const n of history.doc.nodes)
+    if (n.visible && !geometries.get(n.id).boundingBox.isEmpty())
+      box.union(geometries.get(n.id).boundingBox);
+  return box.isEmpty()
+    ? new THREE.Box3(
+        new THREE.Vector3(-20, -20, 0),
+        new THREE.Vector3(20, 20, 20),
+      )
+    : box;
+}
+function fit(direction = null) {
+  const box = bounds(),
+    center = box.getCenter(new THREE.Vector3()),
+    radius = Math.max(15, box.getSize(new THREE.Vector3()).length() * 0.65);
+  const dir =
+    direction || camera.position.clone().sub(controls.target).normalize();
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(dir, radius * 2.6);
+  if (orthographic) {
+    camera.zoom = 90 / radius;
+    camera.updateProjectionMatrix();
+  }
+  controls.update();
+}
+$("fit").onclick = () => fit();
+for (const b of document.querySelectorAll("[data-view]"))
+  b.onclick = () => {
+    viewName = b.dataset.view.toUpperCase();
+    const dirs = {
+      iso: new THREE.Vector3(1, -1, 1).normalize(),
+      top: new THREE.Vector3(0, -0.0001, 1).normalize(),
+      front: new THREE.Vector3(0, -1, 0.0001),
+      right: new THREE.Vector3(1, 0, 0.0001),
+    };
+    fit(dirs[b.dataset.view]);
+    labelView();
+  };
+function labelView() {
+  $("viewport-label").textContent =
+    `${viewName} · ${orthographic ? "ORTHOGRAPHIC" : "PERSPECTIVE"}`;
+}
+$("projection").onclick = () => {
+  const position = camera.position.clone(),
+    target = controls.target.clone();
+  orthographic = !orthographic;
+  controls.dispose();
+  camera = orthographic
+    ? new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, 10000)
+    : new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+  camera.up.set(0, 0, 1);
+  camera.position.copy(position);
+  controls = new OrbitControls(camera, $("view"));
+  controls.enableDamping = true;
+  controls.target.copy(target);
+  $("projection").textContent = orthographic ? "Perspective" : "Orthographic";
+  resize();
+  fit();
+  labelView();
+};
+$("wire").onclick = () => {
+  wire = !wire;
+  for (const m of meshById.values()) m.material.wireframe = wire;
+  $("wire").classList.toggle("active", wire);
+};
+$("grid").onclick = () => {
+  grid.visible = !grid.visible;
+};
+$("clip").onchange = () => {
+  for (const m of meshById.values())
+    m.material.clippingPlanes = $("clip").checked ? [sectionPlane] : [];
+};
+$("section").oninput = () => {
+  sectionPlane.constant = Number($("section").value);
+};
+function clearMeasurement() {
+  measurePoints = [];
+  $("measurement").textContent = "";
+  for (const m of [...decorations.children]) {
+    m.geometry?.dispose();
+    m.material?.dispose();
+    decorations.remove(m);
+  }
+}
+$("measure").onclick = () => {
+  measurementMode = !measurementMode;
+  clearMeasurement();
+  $("measure").classList.toggle("active", measurementMode);
+  tell(
+    measurementMode
+      ? "Click two visible surfaces to measure their distance."
+      : "Measurement mode disabled.",
+  );
+};
+let down = null;
+$("view").addEventListener("pointerdown", (e) => {
+  down = [e.clientX, e.clientY];
+});
+$("view").addEventListener("pointerup", (e) => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;
+  const rect = $("view").getBoundingClientRect();
+  raycaster.setFromCamera(
+    new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      (-(e.clientY - rect.top) / rect.height) * 2 + 1,
+    ),
+    camera,
+  );
+  const hits = raycaster.intersectObjects(
+    [...meshById.values()].filter((m) => m.visible),
+  );
+  const hit = hits.find(
+    (h) => !$("clip").checked || sectionPlane.distanceToPoint(h.point) >= 0,
+  );
+  if (!hit) return;
+  if (!measurementMode) {
+    select(hit.object.userData.id, e.shiftKey);
+    return;
+  }
+  if (measurePoints.length === 2) clearMeasurement();
+  measurePoints.push(hit.point.clone());
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.65, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0xc63043 }),
+  );
+  dot.position.copy(hit.point);
+  decorations.add(dot);
+  if (measurePoints.length === 2) {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(measurePoints),
+      new THREE.LineBasicMaterial({ color: 0xc63043 }),
+    );
+    decorations.add(line);
+    $("measurement").textContent =
+      `Distance ${measurePoints[0].distanceTo(measurePoints[1]).toFixed(3)} mm`;
+  }
+});
+function resize() {
+  const r = $("viewport").getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  if (orthographic) {
+    const aspect = r.width / r.height;
+    camera.left = -100 * aspect;
+    camera.right = 100 * aspect;
+  } else camera.aspect = r.width / r.height;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe($("viewport"));
+function openSketch(node = null) {
+  sketchEditing = node?.id || null;
+  sketchPoints = node ? structuredClone(node.params.profile) : [];
+  $("pad-height").value = node ? node.params.height : 12;
+  $("sketch-dialog").showModal();
+  drawSketch();
+}
+$("sketch").onclick = () => openSketch();
+$("cancel-sketch").onclick = () => $("sketch-dialog").close();
+const sketchContext = $("sketch-canvas").getContext("2d");
+function drawSketch() {
+  const c = sketchContext;
+  c.fillStyle = "#f4f7fa";
+  c.fillRect(0, 0, 600, 420);
+  c.strokeStyle = "#dbe2e7";
+  c.lineWidth = 1;
+  for (let x = 0; x <= 600; x += 10) {
+    c.beginPath();
+    c.moveTo(x, 0);
+    c.lineTo(x, 420);
+    c.stroke();
+  }
+  for (let y = 0; y <= 420; y += 10) {
+    c.beginPath();
+    c.moveTo(0, y);
+    c.lineTo(600, y);
+    c.stroke();
+  }
+  c.strokeStyle = "#91a5b2";
+  c.beginPath();
+  c.moveTo(300, 0);
+  c.lineTo(300, 420);
+  c.moveTo(0, 210);
+  c.lineTo(600, 210);
+  c.stroke();
+  c.strokeStyle = "#0576b3";
+  c.lineWidth = 2;
+  c.beginPath();
+  sketchPoints.forEach((p, i) =>
+    i
+      ? c.lineTo(300 + p[0] * 10, 210 - p[1] * 10)
+      : c.moveTo(300 + p[0] * 10, 210 - p[1] * 10),
+  );
+  if (sketchPoints.length > 2) c.closePath();
+  c.stroke();
+  c.fillStyle = "#d44d27";
+  sketchPoints.forEach((p) => {
+    c.beginPath();
+    c.arc(300 + p[0] * 10, 210 - p[1] * 10, 4, 0, Math.PI * 2);
+    c.fill();
+  });
+  $("sketch-status").textContent =
+    `${sketchPoints.length} vertices · XY coordinates in mm · no constraint solver`;
+}
+$("sketch-canvas").onclick = (e) => {
+  if (sketchPoints.length >= 64) return;
+  const rect = e.target.getBoundingClientRect(),
+    x = ((e.clientX - rect.left) * 600) / rect.width,
+    y = ((e.clientY - rect.top) * 420) / rect.height;
+  const p = [Math.round((x - 300) / 10), Math.round((210 - y) / 10)];
+  if (sketchPoints.length && sketchPoints.at(-1).every((v, i) => v === p[i]))
+    return;
+  sketchPoints.push(p);
+  drawSketch();
+};
+$("remove-point").onclick = () => {
+  sketchPoints.pop();
+  drawSketch();
+};
+$("clear-sketch").onclick = () => {
+  sketchPoints = [];
+  drawSketch();
+};
+$("pad").onclick = () => {
+  try {
+    validateProfile(sketchPoints);
+    const height = Number($("pad-height").value),
+      id = sketchEditing || nextId();
+    const node = makeNode("extrude", id);
+    node.params = { height, profile: structuredClone(sketchPoints) };
+    const before = history.doc;
+    change((d) => {
+      const existing = d.nodes.find((n) => n.id === id);
+      if (existing) existing.params = node.params;
+      else d.nodes.push(node);
+    });
+    if (history.doc !== before) {
+      $("sketch-dialog").close();
+      select(id);
+      fit();
+    } else $("sketch-status").textContent = $("console").textContent;
+  } catch (e) {
+    $("sketch-status").textContent = e.message;
+  }
+};
+addEventListener("keydown", (e) => {
+  if (
+    ["INPUT", "TEXTAREA"].includes(e.target.tagName) ||
+    $("sketch-dialog").open
+  )
+    return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    e.shiftKey ? redo() : undo();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    e.preventDefault();
+    $("save").click();
+  }
+  if (e.key === "Delete") $("delete").click();
+});
+refresh();
+resize();
+fit();
+function animate() {
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+window.cadDiagnostics = () => ({
+  nodes: history.doc.nodes.length,
+  selected: [...selection],
+  webgl: !!renderer.getContext(),
+  visible: history.doc.nodes.filter((n) => n.visible).length,
+  history: history.past.length,
+});

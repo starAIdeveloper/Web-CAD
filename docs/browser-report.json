@@ -1,0 +1,19 @@
+{
+  "passed": [
+    "WebGL rendering",
+    "parametric source edit recomputes Boolean",
+    "undo redo",
+    "invalid dimension rejection",
+    "interactive sketch pad",
+    "two operand union",
+    "orthographic and preset views",
+    "wireframe and section",
+    "STL OBJ PNG downloads",
+    "JSON roundtrip",
+    "raycast picking",
+    "surface distance measurement",
+    "autosave reload",
+    "mobile layout"
+  ],
+  "page_errors": []
+}
